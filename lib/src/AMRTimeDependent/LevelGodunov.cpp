@@ -138,6 +138,7 @@ void LevelGodunov::define(const DisjointBoxLayout&    a_thisDisjointBoxLayout,
                        m_numCons,
                        coarsen(a_domain,a_refineCoarse),
                        a_refineCoarse,
+                       m_dx,
                        m_numGhost);
     }
 

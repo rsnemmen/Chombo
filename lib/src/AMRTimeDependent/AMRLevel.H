@@ -112,6 +112,10 @@ public:
   virtual
     Real advance() = 0;
 
+  virtual
+    Real getDlMin()
+     { return 1.; }
+
   ///
   /**
      Return true if the solution has converged to  a steady state for this level.

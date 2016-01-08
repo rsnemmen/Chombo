@@ -21,6 +21,8 @@
 #include "ProblemDomain.H"
 #include "NamespaceHeader.H"
 
+extern Real g_domBeg[3], g_x2stretch, g_x3stretch;
+
 /// Fills ghost cells by linear interpolation in space and time
 
 /**
@@ -158,6 +160,7 @@ virtual  ~PiecewiseLinearFillPatch();
                            int a_num_comps,
                            const Box& a_crse_problem_domain,
                            int a_ref_ratio,
+                           Real a_dx,
                            int a_interp_radius,
                            bool a_pwconst_interp_only = false
                            );
@@ -180,6 +183,7 @@ virtual  ~PiecewiseLinearFillPatch();
                            int a_num_comps,
                            const ProblemDomain& a_crse_problem_domain,
                            int a_ref_ratio,
+                           Real a_dx,
                            int a_interp_radius,
                            bool a_pwconst_interp_only = false
                            );
@@ -208,6 +212,7 @@ virtual  ~PiecewiseLinearFillPatch();
          int a_num_comps,
          const Box& a_crse_problem_domain,
          int a_ref_ratio,
+         Real a_dx,
          int a_interp_radius,
          bool a_pwconst_interp_only = false
          );
@@ -236,6 +241,7 @@ virtual  ~PiecewiseLinearFillPatch();
          int a_num_comps,
          const ProblemDomain& a_crse_problem_domain,
          int a_ref_ratio,
+         Real a_dx,
          int a_interp_radius,
          bool a_pwconst_interp_only = false
          );
@@ -310,8 +316,15 @@ virtual  ~PiecewiseLinearFillPatch();
   void
   printIntVectSets() const;
 
+  // modified for cylindrical geometry (1 = cartesian)
+  virtual int get_geometry ()
+              { return 1; }
+
 
 protected:
+  // variable containing informations about geometry
+  int m_geometry;
+
   // copy coarse data to coarsened fine work array and interpolate to
   // fine time level
   void
@@ -370,6 +383,8 @@ protected:
   static const int s_stencil_radius;
   // refinement ratio
   int m_ref_ratio;
+  // grid resolution (fine)
+  Real m_dx;
   // number of layers of fine ghost cells to fill by interpolation.
   int m_interp_radius;
   // work array for coarse data in grids shaped like the fine level.
@@ -382,6 +397,7 @@ protected:
   LayoutData<IntVectSet> m_fine_interp;
   // per-grid coarse locations that you interpolate from, by type of
   // interpolation in the specified coordinate direction.
+  LayoutData<IntVectSet> m_coarse_tot_interp;
   LayoutData<IntVectSet> m_coarse_centered_interp[SpaceDim];
   LayoutData<IntVectSet> m_coarse_lo_interp[SpaceDim];
   LayoutData<IntVectSet> m_coarse_hi_interp[SpaceDim];

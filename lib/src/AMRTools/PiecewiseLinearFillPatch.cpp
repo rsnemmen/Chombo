@@ -19,6 +19,7 @@
 #include "DisjointBoxLayout.H"
 #include "LayoutIterator.H"
 #include "InterpF_F.H"
+#include "BoxIterator.H"
 #include "CH_Timer.H"
 #include "MayDay.H"
 using std::cout;
@@ -57,6 +58,7 @@ PiecewiseLinearFillPatch::PiecewiseLinearFillPatch(
   int a_num_comps,
   const Box& a_crse_problem_domain,
   int a_ref_ratio,
+  Real a_dx,
   int a_interp_radius,
   bool a_pwconst_interp_only)
   :
@@ -68,6 +70,7 @@ PiecewiseLinearFillPatch::PiecewiseLinearFillPatch(
          a_num_comps,
          crseProbDomain,
          a_ref_ratio,
+         a_dx,
          a_interp_radius,
          a_pwconst_interp_only);
 }
@@ -78,6 +81,7 @@ PiecewiseLinearFillPatch::PiecewiseLinearFillPatch(
   int a_num_comps,
   const ProblemDomain& a_crse_problem_domain,
   int a_ref_ratio,
+  Real a_dx,
   int a_interp_radius,
   bool a_pwconst_interp_only)
   :
@@ -88,6 +92,7 @@ PiecewiseLinearFillPatch::PiecewiseLinearFillPatch(
          a_num_comps,
          a_crse_problem_domain,
          a_ref_ratio,
+         a_dx,
          a_interp_radius,
          a_pwconst_interp_only);
 }
@@ -99,13 +104,14 @@ PiecewiseLinearFillPatch::define(
   int a_num_comps,
   const Box& a_crse_problem_domain,
   int a_ref_ratio,
+  Real a_dx,
   int a_interp_radius,
   bool a_pwconst_interp_only
   )
 {
   ProblemDomain crseProbDomain(a_crse_problem_domain);
   define(a_fine_domain, a_coarse_domain, a_num_comps,
-         crseProbDomain, a_ref_ratio, a_interp_radius,
+         crseProbDomain, a_ref_ratio, a_dx, a_interp_radius,
          a_pwconst_interp_only);
 }
 
@@ -137,14 +143,17 @@ PiecewiseLinearFillPatch::define(
   int a_num_comps,
   const ProblemDomain& a_crse_problem_domain,
   int a_ref_ratio,
+  Real a_dx,
   int a_interp_radius,
   bool a_pwconst_interp_only
   )
 {
   CH_TIME("PiecewiseLinearFillPatch::define");
   m_ref_ratio = a_ref_ratio;
+  m_dx = a_dx;
   m_interp_radius = a_interp_radius;
   m_crse_problem_domain = a_crse_problem_domain;
+  m_geometry = get_geometry();
 
   bool isSorted = (a_fine_domain.isSorted() && a_coarse_domain.isSorted());
 
@@ -195,6 +204,7 @@ PiecewiseLinearFillPatch::define(
       m_fine_interp.define(a_fine_domain);
       if (!a_pwconst_interp_only)
         {
+          m_coarse_tot_interp.define(coarsened_fine_domain);
           for (int dir = 0; dir < SpaceDim; ++dir)
             {
               m_coarse_centered_interp[dir].define(coarsened_fine_domain);
@@ -292,6 +302,9 @@ PiecewiseLinearFillPatch::define(
 
           if (!a_pwconst_interp_only)
             {
+              IntVectSet& coarse_tot_interp = m_coarse_tot_interp[dit()];
+              coarse_tot_interp = coarsened_fine_interp;
+              coarse_tot_interp.grow(1); 
               for (int dir = 0; dir < SpaceDim; ++dir)
                 {
                   IntVectSet& coarse_centered_interp
@@ -444,6 +457,95 @@ PiecewiseLinearFillPatch::fillInterpPWConstSpace(
                        m_coarsened_fine_data,
                        dest_interval,
                        m_coarsenCopier);
+
+  // Divide by normalized volume (dV/dx^3) -- cylindrical or polar (linear radius) coordinates
+  if ((m_geometry == 2) || (m_geometry == 5)) {
+   DataIterator dit = m_coarsened_fine_data.boxLayout().dataIterator();
+   for (dit.begin(); dit.ok(); ++dit)
+     {
+       FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+       const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+       IVSIterator ivsit(local_coarsened);
+       for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+        const IntVect& iv = ivsit();
+        Real volume_1 = 1./fabs(g_domBeg[0]/m_dx+(iv[0]+0.5)*m_ref_ratio);
+        for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+         coarsened_fine_fab(iv, ivar) *= volume_1;
+        }
+       }
+     }
+  }
+
+  // Divide by normalized volume (dV/dx^3) -- spherical coordinates
+  if (m_geometry == 3) {
+   DataIterator dit = m_coarsened_fine_data.boxLayout().dataIterator();
+   for (dit.begin(); dit.ok(); ++dit)
+     {
+       FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+       const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+       IVSIterator ivsit(local_coarsened);
+       for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+        const IntVect& iv = ivsit();
+        Real x1l = g_domBeg[0]+iv[0]*m_ref_ratio*m_dx;
+        Real x1r = x1l + m_ref_ratio*m_dx;
+        Real volume_1 = 3./(x1r*x1r*x1r-x1l*x1l*x1l)*m_ref_ratio;
+#if CH_SPACEDIM > 1
+        Real x2l = g_domBeg[1]+iv[1]*m_ref_ratio*m_dx*g_x2stretch;
+        Real x2r = x2l + m_ref_ratio*m_dx*g_x2stretch;
+        volume_1 *= m_ref_ratio/(cos(x2l)-cos(x2r));
+#endif
+        for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+         coarsened_fine_fab(iv, ivar) *= volume_1;
+        }
+       }
+     }
+  }
+
+  // Divide by normalized volume (dV/dx^3) -- spherical coordinates - logarithmic radius
+  if (m_geometry == 4) {
+   DataIterator dit = m_coarsened_fine_data.boxLayout().dataIterator();
+   for (dit.begin(); dit.ok(); ++dit)
+     {
+       FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+       const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+       IVSIterator ivsit(local_coarsened);
+       for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+        const IntVect& iv = ivsit();
+        Real x1l = iv[0]*m_ref_ratio*m_dx;
+        Real x1r = x1l + m_ref_ratio*m_dx;
+        Real volume_1 = 3./(exp(3.*x1r)-exp(3.*x1l))*m_ref_ratio;
+#if CH_SPACEDIM > 1
+        Real x2l = g_domBeg[1]+iv[1]*m_ref_ratio*m_dx*g_x2stretch;
+        Real x2r = x2l + m_ref_ratio*m_dx*g_x2stretch;
+        volume_1 *= m_ref_ratio/(cos(x2l)-cos(x2r));
+#endif
+        for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+         coarsened_fine_fab(iv, ivar) *= volume_1;
+        }
+       }
+     }
+  }
+
+  // Divide by normalized volume (dV/dx^3) -- polar coordinates - logarithmic radius
+  if (m_geometry == 6) {
+   DataIterator dit = m_coarsened_fine_data.boxLayout().dataIterator();
+   for (dit.begin(); dit.ok(); ++dit)
+     {
+       FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+       const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+       IVSIterator ivsit(local_coarsened);
+       for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+        const IntVect& iv = ivsit();
+        Real x1l = iv[0]*m_ref_ratio*m_dx;
+        Real x1r = x1l + m_ref_ratio*m_dx;
+        Real volume_1 = 2./(exp(2.*x1r)-exp(2.*x1l))*m_ref_ratio;
+        for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+         coarsened_fine_fab(iv, ivar) *= volume_1;
+        }
+       }
+     }
+  }
+
   fillConstantInterp(a_fine_data,
                      a_src_comp,
                      a_dest_comp,
@@ -521,6 +623,95 @@ PiecewiseLinearFillPatch::timeInterp(
           coarsened_fine_fab.plus(tmp_coarsened_fine_fab,a_src_comp,a_dest_comp,a_num_comp);
         }
     }
+
+     // Divide by normalized volume (dV/dx^3) -- cylindrical or polar (linear radius) coordinates
+     if ((m_geometry == 2) || (m_geometry == 5)) {
+      DataIterator dit = m_coarsened_fine_data.dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+          const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+          IVSIterator ivsit(local_coarsened);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+           const IntVect& iv = ivsit();
+           Real volume_1 = 1./fabs(g_domBeg[0]/m_dx+(iv[0]+0.5)*m_ref_ratio);
+           for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+            coarsened_fine_fab(iv, ivar) *= volume_1;
+           }
+          }
+        }
+     }
+
+     // Divide by normalized volume (dV/dx^3) -- spherical coordinates
+     if (m_geometry == 3) {
+      DataIterator dit = m_coarsened_fine_data.boxLayout().dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+          const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+          IVSIterator ivsit(local_coarsened);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+           const IntVect& iv = ivsit();
+           Real x1l = g_domBeg[0]+iv[0]*m_ref_ratio*m_dx;
+           Real x1r = x1l + m_ref_ratio*m_dx;
+           Real volume_1 = 3./(x1r*x1r*x1r-x1l*x1l*x1l)*m_ref_ratio;
+#if CH_SPACEDIM > 1
+           Real x2l = g_domBeg[1]+iv[1]*m_ref_ratio*m_dx*g_x2stretch;
+           Real x2r = x2l + m_ref_ratio*m_dx*g_x2stretch;
+           volume_1 *= m_ref_ratio/(cos(x2l)-cos(x2r));
+#endif
+           for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+            coarsened_fine_fab(iv, ivar) *= volume_1;
+           }
+          }
+        }
+     }
+
+     // Divide by normalized volume (dV/dx^3) -- spherical coordinates - logarithmic radius
+     if (m_geometry == 4) {
+      DataIterator dit = m_coarsened_fine_data.boxLayout().dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+          const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+          IVSIterator ivsit(local_coarsened);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+           const IntVect& iv = ivsit();
+           Real x1l = iv[0]*m_ref_ratio*m_dx;
+           Real x1r = x1l + m_ref_ratio*m_dx;
+           Real volume_1 = 3./(exp(3.*x1r)-exp(3.*x1l))*m_ref_ratio;
+#if CH_SPACEDIM > 1
+           Real x2l = g_domBeg[1]+iv[1]*m_ref_ratio*m_dx*g_x2stretch;
+           Real x2r = x2l + m_ref_ratio*m_dx*g_x2stretch;
+           volume_1 *= m_ref_ratio/(cos(x2l)-cos(x2r));
+#endif
+           for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+            coarsened_fine_fab(iv, ivar) *= volume_1;
+           }
+          }
+        }
+     }
+
+     // Divide by normalized volume (dV/dx^3) -- polar coordinates - logarithmic radius
+     if (m_geometry == 6) {
+      DataIterator dit = m_coarsened_fine_data.boxLayout().dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          FArrayBox& coarsened_fine_fab = m_coarsened_fine_data[dit()];
+          const IntVectSet& local_coarsened = m_coarse_tot_interp[dit()];
+          IVSIterator ivsit(local_coarsened);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit) {
+           const IntVect& iv = ivsit();
+           Real x1l = iv[0]*m_ref_ratio*m_dx;
+           Real x1r = x1l + m_ref_ratio*m_dx;
+           Real volume_1 = 2./(exp(2.*x1r)-exp(2.*x1l))*m_ref_ratio;
+           for(int ivar = 0; ivar < coarsened_fine_fab.nComp(); ivar++) {
+            coarsened_fine_fab(iv, ivar) *= volume_1;
+           }
+          }
+        }
+     }
+
 }
 
 // fill the fine interpolation region piecewise-constantly
@@ -536,6 +727,8 @@ PiecewiseLinearFillPatch::fillConstantInterp(
   CH_TIME("PiecewiseLinearFillPatch::fillConstantInterp");
   DataIterator dit = a_fine_data.boxLayout().dataIterator();
 
+  // Cartesian coordinates
+  if (m_geometry == 1) {
   for (dit.begin(); dit.ok(); ++dit)
     {
       FArrayBox& fine_fab = a_fine_data[dit()];
@@ -551,7 +744,104 @@ PiecewiseLinearFillPatch::fillConstantInterp(
           for (; coarse_comp < a_src_comp + a_num_comp; ++fine_comp, ++coarse_comp)
             fine_fab(fine_iv, fine_comp) = coarse_fab(coarse_iv, coarse_comp);
         }
-    }
+    }}
+
+// Cylindrical or polar (linear radius) coordinates
+  if ((m_geometry == 2) || (m_geometry == 5)) {
+  for (dit.begin(); dit.ok(); ++dit)
+    {
+      FArrayBox& fine_fab = a_fine_data[dit()];
+      const FArrayBox& coarse_fab = m_coarsened_fine_data[dit()];
+      const IntVectSet& local_fine_interp = m_fine_interp[dit()];
+      IVSIterator ivsit(local_fine_interp);
+      for (ivsit.begin(); ivsit.ok(); ++ivsit)
+        {
+          const IntVect& fine_iv = ivsit();
+          IntVect coarse_iv = coarsen(fine_iv, m_ref_ratio);
+          int coarse_comp = a_src_comp;
+          int fine_comp   = a_dest_comp;
+          Real volume = fabs(g_domBeg[0]/m_dx+fine_iv[0]+0.5);
+          for (; coarse_comp < a_src_comp + a_num_comp; ++fine_comp, ++coarse_comp)
+            fine_fab(fine_iv, fine_comp) = coarse_fab(coarse_iv, coarse_comp)*volume;
+        }
+    }}
+
+// Spherical coordinates
+  if (m_geometry == 3) {
+  for (dit.begin(); dit.ok(); ++dit)
+    {
+      FArrayBox& fine_fab = a_fine_data[dit()];
+      const FArrayBox& coarse_fab = m_coarsened_fine_data[dit()];
+      const IntVectSet& local_fine_interp = m_fine_interp[dit()];
+      IVSIterator ivsit(local_fine_interp);
+      for (ivsit.begin(); ivsit.ok(); ++ivsit)
+        {
+          const IntVect& fine_iv = ivsit();
+          IntVect coarse_iv = coarsen(fine_iv, m_ref_ratio);
+          int coarse_comp = a_src_comp;
+          int fine_comp   = a_dest_comp;
+          Real x1l = g_domBeg[0]+fine_iv[0]*m_dx;
+          Real x1r = x1l + m_dx;
+          Real volume = (x1r*x1r*x1r-x1l*x1l*x1l)/3.;
+#if CH_SPACEDIM > 1
+          Real x2l = g_domBeg[1]+fine_iv[1]*m_dx*g_x2stretch;
+          Real x2r = x2l + m_dx*g_x2stretch;
+          volume *= cos(x2l)-cos(x2r);
+#endif
+          for (; coarse_comp < a_src_comp + a_num_comp; ++fine_comp, ++coarse_comp)
+            fine_fab(fine_iv, fine_comp) = coarse_fab(coarse_iv, coarse_comp)*volume;
+        }
+    }}
+
+// Spherical coordinates - logarithmic radius
+  if (m_geometry == 4) {
+  for (dit.begin(); dit.ok(); ++dit)
+    {
+      FArrayBox& fine_fab = a_fine_data[dit()];
+      const FArrayBox& coarse_fab = m_coarsened_fine_data[dit()];
+      const IntVectSet& local_fine_interp = m_fine_interp[dit()];
+      IVSIterator ivsit(local_fine_interp);
+      for (ivsit.begin(); ivsit.ok(); ++ivsit)
+        {
+          const IntVect& fine_iv = ivsit();
+          IntVect coarse_iv = coarsen(fine_iv, m_ref_ratio);
+          int coarse_comp = a_src_comp;
+          int fine_comp   = a_dest_comp;
+          Real x1l = fine_iv[0]*m_dx;
+          Real x1r = x1l + m_dx;
+          Real volume = (exp(3.*x1r)-exp(3.*x1l))/3.;
+#if CH_SPACEDIM > 1
+          Real x2l = g_domBeg[1]+fine_iv[1]*m_dx*g_x2stretch;
+          Real x2r = x2l + m_dx*g_x2stretch;
+          volume *= cos(x2l)-cos(x2r);
+#endif
+          for (; coarse_comp < a_src_comp + a_num_comp; ++fine_comp, ++coarse_comp)
+            fine_fab(fine_iv, fine_comp) = coarse_fab(coarse_iv, coarse_comp)*volume;
+        }
+    }}
+
+// Polar coordinates - logarithmic radius
+  if (m_geometry == 6) {
+  for (dit.begin(); dit.ok(); ++dit)
+    {
+      FArrayBox& fine_fab = a_fine_data[dit()];
+      const FArrayBox& coarse_fab = m_coarsened_fine_data[dit()];
+      const IntVectSet& local_fine_interp = m_fine_interp[dit()];
+      IVSIterator ivsit(local_fine_interp);
+      for (ivsit.begin(); ivsit.ok(); ++ivsit)
+        {
+          const IntVect& fine_iv = ivsit();
+          IntVect coarse_iv = coarsen(fine_iv, m_ref_ratio);
+          int coarse_comp = a_src_comp;
+          int fine_comp   = a_dest_comp;
+          Real x1l = fine_iv[0]*m_dx;
+          Real x1r = x1l + m_dx;
+          Real volume = (exp(2.*x1r)-exp(2.*x1l))/2.;
+          for (; coarse_comp < a_src_comp + a_num_comp; ++fine_comp, ++coarse_comp)
+            fine_fab(fine_iv, fine_comp) = coarse_fab(coarse_iv, coarse_comp)*volume;
+        }
+    }}
+
 }
 
 // compute slopes at the coarse interpolation sites in the specified direction
@@ -661,9 +951,9 @@ void  PiecewiseLinearFillPatch::computeMultiDimSlopes(FArrayBox      & a_slopes0
 {
  // this is the same stuff that is in FineInterp.cpp
       Box b_mod(a_slopeBox);
-      b_mod.grow(1);
+//      b_mod.grow(1);
       b_mod = m_crse_problem_domain & b_mod;
-      b_mod.grow(-1);
+//      b_mod.grow(-1);
 
       // create a box big enough to remove periodic BCs from domain
       Box domBox = grow(a_slopeBox,2);
@@ -696,6 +986,9 @@ PiecewiseLinearFillPatch::incrementLinearInterp(
   const
 {
   CH_TIME("PiecewiseLinearFillPatch::incrementLinearInterp");
+
+// Cartesian coordinates
+  if (m_geometry == 1) {
   for (int dir=0; dir<SpaceDim; dir++)
     {
       DataIterator dit = a_fine_data.boxLayout().dataIterator();
@@ -720,7 +1013,180 @@ PiecewiseLinearFillPatch::incrementLinearInterp(
                 }
             }
         }
-    }
+    }}
+
+// Cylindrical or polar (linear radius) coordinates
+  if ((m_geometry == 2) || (m_geometry == 5)) {
+  for (int dir=0; dir<SpaceDim; dir++)
+    {
+      DataIterator dit = a_fine_data.boxLayout().dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          const FArrayBox& slope_fab = m_slopes[dir][dit()];
+          FArrayBox& fine_data_fab = a_fine_data[dit()];
+          const IntVectSet& fine_interp = m_fine_interp[dit()];
+          IVSIterator ivsit(fine_interp);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit)
+            {
+              const IntVect& fine_iv = ivsit();
+              const IntVect coarse_iv = coarsen(fine_iv,m_ref_ratio);
+              const int indf = fine_iv[dir];
+              const int indc = coarse_iv[dir];
+              Real volume = fabs(g_domBeg[0]/m_dx+fine_iv[0] + 0.5);
+              Real interp_coef = (indf + 0.5)/m_ref_ratio - indc - 0.5;
+              if (dir == 0) {
+                Real x1l = g_domBeg[0]+fine_iv[0]*m_dx;
+                Real x1r = x1l + m_dx;
+                Real xlc = g_domBeg[0]+coarse_iv[0]*m_ref_ratio*m_dx;
+                Real xrc = xlc + m_ref_ratio*m_dx;
+                Real interp_coef = .5*(x1l*x1l+x1r*x1r-xlc*xlc-xrc*xrc)/(xrc*xrc-xlc*xlc);
+              }
+              int coarse_comp = a_src_comp;
+              int fine_comp   = a_dest_comp;
+              for (; coarse_comp < a_src_comp + a_num_comp; ++coarse_comp, ++fine_comp)
+                {
+                  fine_data_fab(fine_iv,fine_comp)
+                    += interp_coef * slope_fab(coarse_iv,coarse_comp)*volume;
+                }
+            }
+        }
+    }}
+
+// Spherical coordinates
+  if (m_geometry == 3) {
+  for (int dir=0; dir<SpaceDim; dir++)
+    {
+      DataIterator dit = a_fine_data.boxLayout().dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          const FArrayBox& slope_fab = m_slopes[dir][dit()];
+          FArrayBox& fine_data_fab = a_fine_data[dit()];
+          const IntVectSet& fine_interp = m_fine_interp[dit()];
+          IVSIterator ivsit(fine_interp);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit)
+            {
+              const IntVect& fine_iv = ivsit();
+              const IntVect coarse_iv = coarsen(fine_iv,m_ref_ratio);
+              const int indf = fine_iv[dir];
+              const int indc = coarse_iv[dir];
+              Real x1l = g_domBeg[0]+fine_iv[0]*m_dx;
+              Real x1r = x1l + m_dx;
+              Real volume = (x1r*x1r*x1r-x1l*x1l*x1l)/3.;
+#if CH_SPACEDIM > 1
+              Real x2l = g_domBeg[1]+fine_iv[1]*m_dx*g_x2stretch;
+              Real x2r = x2l + m_dx*g_x2stretch;
+              volume *= (cos(x2l)-cos(x2r));
+#endif
+              Real interp_coef = (indf + 0.5)/m_ref_ratio - indc - 0.5;
+              if (dir == 0) {
+                 Real xlc = g_domBeg[0]+coarse_iv[0]*m_ref_ratio*m_dx;
+                 Real xrc = xlc + m_ref_ratio*m_dx;
+                 interp_coef = .5*(x1l*x1l*x1l+x1r*x1r*x1r-xlc*xlc*xlc-xrc*xrc*xrc)/(xrc*xrc*xrc-xlc*xlc*xlc);
+              }
+#if CH_SPACEDIM > 1
+              if (dir == 1) {
+                 Real xlc = g_domBeg[1]+coarse_iv[1]*m_ref_ratio*m_dx*g_x2stretch;
+                 Real xrc = xlc + m_ref_ratio*m_dx*g_x2stretch;
+                 interp_coef = .5*(cos(x2l)+cos(x2r)-cos(xlc)-cos(xrc))/(cos(xrc)-cos(xlc));
+              }
+#endif
+              int coarse_comp = a_src_comp;
+              int fine_comp   = a_dest_comp;
+              for (; coarse_comp < a_src_comp + a_num_comp; ++coarse_comp, ++fine_comp)
+                {
+                  fine_data_fab(fine_iv,fine_comp)
+                    += interp_coef * slope_fab(coarse_iv,coarse_comp)*volume;
+                }
+            }
+        }
+    }}
+
+// Spherical coordinates - logarithmic radius
+  if (m_geometry == 4) {
+  for (int dir=0; dir<SpaceDim; dir++)
+    {
+      DataIterator dit = a_fine_data.boxLayout().dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          const FArrayBox& slope_fab = m_slopes[dir][dit()];
+          FArrayBox& fine_data_fab = a_fine_data[dit()];
+          const IntVectSet& fine_interp = m_fine_interp[dit()];
+          IVSIterator ivsit(fine_interp);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit)
+            {
+              const IntVect& fine_iv = ivsit();
+              const IntVect coarse_iv = coarsen(fine_iv,m_ref_ratio);
+              const int indf = fine_iv[dir];
+              const int indc = coarse_iv[dir];
+              Real x1l = fine_iv[0]*m_dx;
+              Real x1r = x1l + m_dx;
+              Real volume = (exp(3.*x1r)-exp(3.*x1l))/3.;
+#if CH_SPACEDIM > 1
+              Real x2l = g_domBeg[1]+fine_iv[1]*m_dx*g_x2stretch;
+              Real x2r = x2l + m_dx*g_x2stretch;
+              volume *= (cos(x2l)-cos(x2r));
+#endif
+              Real interp_coef = (indf + 0.5)/m_ref_ratio - indc - 0.5;
+              if (dir == 0) {
+                 Real xlc = coarse_iv[0]*m_ref_ratio*m_dx;
+                 Real xrc = xlc + m_ref_ratio*m_dx;
+                 interp_coef = .5*(exp(3.*x1l)+exp(3.*x1r)-exp(3.*xlc)-exp(3.*xrc))/(exp(3.*xrc)-exp(3.*xlc));
+              }
+#if CH_SPACEDIM > 1
+              if (dir == 1) {
+                 Real xlc = g_domBeg[1]+coarse_iv[1]*m_ref_ratio*m_dx*g_x2stretch;
+                 Real xrc = xlc + m_ref_ratio*m_dx*g_x2stretch;
+                 interp_coef = .5*(cos(x2l)+cos(x2r)-cos(xlc)-cos(xrc))/(cos(xrc)-cos(xlc));
+              }
+#endif
+              int coarse_comp = a_src_comp;
+              int fine_comp   = a_dest_comp;
+              for (; coarse_comp < a_src_comp + a_num_comp; ++coarse_comp, ++fine_comp)
+                {
+                  fine_data_fab(fine_iv,fine_comp)
+                    += interp_coef * slope_fab(coarse_iv,coarse_comp)*volume;
+                }
+            }
+        }
+    }}
+
+// Polar coordinates - logarithmic radius
+  if (m_geometry == 6) {
+  for (int dir=0; dir<SpaceDim; dir++)
+    {
+      DataIterator dit = a_fine_data.boxLayout().dataIterator();
+      for (dit.begin(); dit.ok(); ++dit)
+        {
+          const FArrayBox& slope_fab = m_slopes[dir][dit()];
+          FArrayBox& fine_data_fab = a_fine_data[dit()];
+          const IntVectSet& fine_interp = m_fine_interp[dit()];
+          IVSIterator ivsit(fine_interp);
+          for (ivsit.begin(); ivsit.ok(); ++ivsit)
+            {
+              const IntVect& fine_iv = ivsit();
+              const IntVect coarse_iv = coarsen(fine_iv,m_ref_ratio);
+              const int indf = fine_iv[dir];
+              const int indc = coarse_iv[dir];
+              Real x1l = fine_iv[0]*m_dx;
+              Real x1r = x1l + m_dx;
+              Real volume = (exp(2.*x1r)-exp(2.*x1l))/2.;
+              Real interp_coef = (indf + 0.5)/m_ref_ratio - indc - 0.5;
+              if (dir == 0) {
+                 Real xlc = coarse_iv[0]*m_ref_ratio*m_dx;
+                 Real xrc = xlc + m_ref_ratio*m_dx;
+                 interp_coef = .5*(exp(2.*x1l)+exp(2.*x1r)-exp(2.*xlc)-exp(2.*xrc))/(exp(2.*xrc)-exp(2.*xlc));
+              }
+              int coarse_comp = a_src_comp;
+              int fine_comp   = a_dest_comp;
+              for (; coarse_comp < a_src_comp + a_num_comp; ++coarse_comp, ++fine_comp)
+                {
+                  fine_data_fab(fine_iv,fine_comp)
+                    += interp_coef * slope_fab(coarse_iv,coarse_comp)*volume;
+                }
+            }
+        }
+    }}
+
 }
 
 void

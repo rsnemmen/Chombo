@@ -61,6 +61,9 @@ handleCtrlC(int signum)
 
 int AMR::s_step = 0;
 
+extern Real glm_ch_max, glm_ch_max_loc, g_coeff_dl_min;
+extern int  glm_is_defined, g_stepNumber, prank;
+
 //-----------------------------------------------------------------------
 void AMR::useSubcyclingInTime(bool a_useSubcycling)
 {
@@ -77,16 +80,21 @@ void AMR::setDefaultValues()
   m_max_level = -1;
   m_finest_level = -1;
   m_checkpoint_interval= -1;
+  m_checkpoint_period= -1.0;
+  m_checkpoint_clock= -1.0;
   m_plot_interval=-1;
-  m_checkForSteadyState = false;
   m_plot_period=-1.0;
-  m_next_plot_time=-1.0;
+  m_plot_clock= -1.0;
+  m_checkForSteadyState = false;
   m_max_grid_size= 0;
   m_max_base_grid_size = m_max_grid_size;
   m_restart_step = -1;
   m_lastcheck_step = -1;
+  m_lastplot_step = -1;
   m_cur_step =0;
   s_step = m_cur_step;
+  m_num_check = -1;
+  m_num_plot = -1;
   m_maxDtGrow = 1.1;
   m_time_eps = 1.0e-6;
   m_dt_base = -1;
@@ -270,6 +278,20 @@ void AMR::plotInterval(int a_plot_interval)
 }
 
 //-----------------------------------------------------------------------
+void AMR::plotPeriod(Real a_plot_period)
+{
+  m_plot_period = a_plot_period;
+}
+//-----------------------------------------------------------------------
+
+//-----------------------------------------------------------------------
+void AMR::plotClock(Real a_plot_clock)
+{
+  m_plot_clock = a_plot_clock;
+}
+//-----------------------------------------------------------------------
+
+//-----------------------------------------------------------------------
 void AMR::checkForSteadyState(bool a_checkForSteadyState)
 {
   m_checkForSteadyState = a_checkForSteadyState;
@@ -277,17 +299,23 @@ void AMR::checkForSteadyState(bool a_checkForSteadyState)
 //-----------------------------------------------------------------------
 
 //-----------------------------------------------------------------------
-void AMR::plotPeriod(Real a_plot_period)
+void AMR::checkpointInterval(int a_checkpoint_interval)
 {
-  m_plot_period = a_plot_period;
-  m_next_plot_time = m_cur_time;
+  m_checkpoint_interval = a_checkpoint_interval;
 }
 //-----------------------------------------------------------------------
 
 //-----------------------------------------------------------------------
-void AMR::checkpointInterval(int a_checkpoint_interval)
+void AMR::checkpointPeriod(Real a_checkpoint_period)
 {
-  m_checkpoint_interval = a_checkpoint_interval;
+  m_checkpoint_period = a_checkpoint_period;
+}
+//-----------------------------------------------------------------------
+
+//-----------------------------------------------------------------------
+void AMR::checkpointClock(Real a_checkpoint_clock)
+{
+  m_checkpoint_clock = a_checkpoint_clock;
 }
 //-----------------------------------------------------------------------
 
@@ -432,6 +460,8 @@ void AMR::setupForFixedHierarchyRun(const Vector<Vector<Box> >& a_amr_grids,
   m_regrid_intervals.resize(m_max_level, -1);
   m_cur_step = 0;
   s_step = m_cur_step;
+  m_num_check = -1;
+  m_num_plot = -1;
   m_finest_level = a_amr_grids.size() - 1;
 
   if (m_finest_level > m_max_level)
@@ -483,6 +513,8 @@ void AMR::setupForFixedHierarchyRun(const Vector<Vector<Box> >& a_amr_grids,
         m_dt_cur[level] = m_dt_new[level];
       }
 
+    computeDlMin();
+
     assignDt();
   }
 }
@@ -504,6 +536,9 @@ void AMR::setupForNewAMRRun()
 
   m_cur_step = 0;
   s_step = m_cur_step;
+  m_num_check = -1;
+  m_num_plot = -1;
+
   initialGrid();
 
   m_finest_level_old = m_finest_level;
@@ -512,6 +547,8 @@ void AMR::setupForNewAMRRun()
       m_dt_new[level] = m_amrlevels[level]->computeInitialDt();
       m_dt_cur[level] = m_dt_new[level];
     }
+
+  computeDlMin();
 
   assignDt();
 }
@@ -605,11 +642,17 @@ void AMR::setupForRestart(HDF5Handle& a_handle)
 
   m_cur_step = header.m_int ["iteration"];
   s_step = m_cur_step;
+
   if (m_verbosity >= 2)
     {
       pout() << "read cur_step = " << m_cur_step << endl;
     }
+
   m_restart_step = m_cur_step;
+
+  m_num_check = header.m_int ["num_cfile"];
+  m_num_plot  = header.m_int ["num_pfile"];
+
   if (m_verbosity >= 2)
     {
       pout() << "set restart_step = " << m_restart_step << endl;
@@ -684,6 +727,8 @@ void AMR::setupForRestart(HDF5Handle& a_handle)
       m_dt_cur[level] = m_dt_new[level];
     }
 
+  computeDlMin();
+
   assignDt();
 
   //restart cell updates(we could also output them to the chk file)
@@ -702,7 +747,7 @@ void AMR::setupForRestart(HDF5Handle& a_handle)
 //-----------------------------------------------------------------------
 
 //-----------------------------------------------------------------------
-void AMR::conclude() const
+void AMR::conclude()
 {
   CH_TIME("AMR::conclude");
 
@@ -714,15 +759,19 @@ void AMR::conclude() const
       pout() << "AMR::conclude" << endl;
     }
 
-  if ((m_plot_interval >= 0) || (m_plot_period >= 0.0))
-  {
-    writePlotFile();
-  }
+  if (((m_plot_interval >= 0) || (m_plot_period >= 0.0) || (m_plot_clock > 0.0)) &&
+      (m_lastplot_step != m_cur_step) &&
+      (m_restart_step != m_cur_step))
+    {
+      m_num_plot += 1;
+      writePlotFile();
+    }
 
-  if ((m_checkpoint_interval >= 0)     &&
+  if (((m_checkpoint_interval >= 0) || (m_checkpoint_period >= 0.0) || (m_checkpoint_clock >= 0.0)) &&
       (m_lastcheck_step != m_cur_step) &&
       (m_restart_step != m_cur_step))
     {
+      m_num_check += 1;
       writeCheckpointFile();
     }
 
@@ -773,6 +822,7 @@ void AMR::run(Real a_max_time, int a_max_step)
 #ifdef CH_USE_TIMER
   double last_timestep_time = 0 ;
 #endif
+
   if (m_verbosity >= 3)
     {
       pout() << "AMR::coarseTimeStep:" << endl;
@@ -790,121 +840,274 @@ void AMR::run(Real a_max_time, int a_max_step)
   sigaction(SIGINT, &ctrlC, &oldCtrlC);
 #endif
 
+  time_t clock_beg_plt, clock_beg_chk, clock_end;
+  double tbeg_plt, tbeg_chk, tend, dclock;
+
+  // initialize wall-clock time 
+
+  #ifdef CH_MPI
+   if (prank == 0) tbeg_plt = MPI_Wtime();
+   MPI_Bcast(&tbeg_plt, 1, MPI_DOUBLE, 0, Chombo_MPI::comm);      
+   tbeg_chk = tbeg_plt;
+  #else
+   time(&clock_beg_plt);
+   time(&clock_beg_chk);
+  #endif
+
   Real old_dt_base = m_dt_base;
+  int  last_timestep = 0; /* 0  = not last time step
+                             1  = last time step
+                            -1  = quit           */
+
+  if (m_cur_step == 0) glm_ch_max = 1.e-10;
+
+// Write plot file first and then checkpoint.
+// When they're written with the same frequency, the checkpoint will inlcude
+// the updated counter value.
+
+  if (((m_plot_interval >= 0) || (m_plot_period >= 0.0) || (m_plot_clock >= 0.0)) &&
+      (m_restart_step != m_cur_step)) {
+    m_num_plot += 1;
+    writePlotFile();
+    m_lastplot_step = m_cur_step;
+  }
+
+  if (((m_checkpoint_interval >= 0) || (m_checkpoint_period >= 0.0)  || (m_checkpoint_clock >= 0.0)) &&
+      (m_restart_step != m_cur_step)) {
+    m_num_check += 1;
+    writeCheckpointFile();
+    m_lastcheck_step = m_cur_step;
+  }
   bool steadyStateStop = false;
-  for ( ; (m_cur_step < a_max_step) &&
-          (a_max_time - m_cur_time > m_time_eps*m_dt_base);
-        ++m_cur_step, m_cur_time += old_dt_base)
-    {
-        s_step = m_cur_step;
+
+//////////////////////////////////////////////////////////////
+//        Begin main integration loop
+//////////////////////////////////////////////////////////////
+
+  for ( ; (m_cur_step < a_max_step) && (last_timestep != -1);
+        ++m_cur_step, m_cur_time += old_dt_base) {
+      s_step = g_stepNumber = m_cur_step;
 #ifdef CH_USE_TIMER
-      m_timer->start() ;
+    m_timer->start() ;
 #endif
-      old_dt_base = m_dt_base;
-      for (int level = 0; level <= m_max_level; ++level)
-        {
-          m_amrlevels[level]->time(m_cur_time);
-        }
-
-      // Drop a checkpoint file if it's time.
-      if ((m_checkpoint_interval > 0)      &&
-          (m_lastcheck_step != m_cur_step) &&
-          (m_restart_step != m_cur_step)   &&
-          (m_cur_step % m_checkpoint_interval == 0))
-        {
-          writeCheckpointFile();
-          m_lastcheck_step= m_cur_step;
-        }
-
-      // Plot if we've gone enough steps.
-      if ((m_plot_interval > 0) &&
-          (m_cur_step % m_plot_interval == 0))
-        {
-          writePlotFile();
-        }
-
-      // Plot if enough time has passed.
-      if ((m_plot_period > 0.0) &&
-          (m_cur_time >= m_next_plot_time))
-        {
-          writePlotFile();
-          m_next_plot_time = m_cur_time + m_plot_period;
-        }
-
-      // Call any scheduled functions. This is placed here so that
-      // the plotter function can assume plot files have already been dumped.
-      if (!m_scheduler.isNull())
-        m_scheduler->execute(m_cur_step, m_cur_time);
-
-      int level = 0;
-      int stepsLeft = 0;
-      bool timeBoundary = true;
-      (void)timeStep(level,stepsLeft,timeBoundary);
-
-      assignDt();
-#ifdef CH_USE_TIMER
-      m_timer->stop();
-#endif
-      if (m_verbosity >= 1)
-        {
-          std::ios::fmtflags origFlags = pout().flags();
-          int origWidth = pout().width();
-          int origPrecision = pout().precision();
-          pout() << resetiosflags(ios::fixed)
-                 << "coarse time step " << setw(3) << m_cur_step
-                 << "  old time = " << setw(12)
-                 << setprecision(6)
-                 << setiosflags(ios::showpoint)
-                 << setiosflags(ios::scientific)
-                 << m_cur_time
-                 << "  old dt = "   << setw(12)
-                 << setprecision(6)
-                 << setiosflags(ios::showpoint)
-                 << setiosflags(ios::scientific)
-                 << old_dt_base
-#ifdef CH_USE_TIMER
-                 << "  wallclocktime = "
-                 << m_timer->wc_time() - last_timestep_time
-#endif
-                 << resetiosflags(ios::scientific)
-                 << endl;
-          pout().flags(origFlags);
-          pout().width(origWidth);
-          pout().precision(origPrecision);
-        }
-#ifdef CH_USE_TIMER
-      last_timestep_time = m_timer->wc_time() ;
-#endif
-
-      // If we have assigned a signal handler for interrupts, check for
-      // an interrupt and call the handler.
-      if (s_interrupted)
-        break;
-      if (m_checkForSteadyState)
-        {
-          steadyStateStop = m_amrlevels[0]->convergedToSteadyState();
-          for (int level = 1; level <= m_finest_level; ++level)
-            {
-              steadyStateStop = ((steadyStateStop)&&(m_amrlevels[level]->convergedToSteadyState()));
-            }
-        }
-      if (steadyStateStop)
-        {
-          pout() << "AMR: all amr levels said steady state was reached" << endl;
-          if (m_plot_interval > 0)
-            {
-              pout() << "writing plot file" << endl;
-              writePlotFile();
-            }
-          if ((m_checkpoint_interval > 0)      &&
-              (m_lastcheck_step != m_cur_step) )
-            {
-              pout() << "writing checkpoint file" << endl;
-              writeCheckpointFile();
-            }
-          break;
-        }
+    old_dt_base = m_dt_base;
+    for (int level = 0; level <= m_max_level; ++level) {
+      m_amrlevels[level]->time(m_cur_time);
     }
+
+    if (m_verbosity >= 1) {
+      std::ios::fmtflags origFlags = pout().flags();
+      int origWidth = pout().width();
+      int origPrecision = pout().precision();
+      pout() << resetiosflags(ios::fixed)
+             << "coarse step: " << setw(3) << m_cur_step
+             << ";  t = " << setw(12)
+             << setprecision(6)
+             << setiosflags(ios::showpoint)
+             << setiosflags(ios::scientific)
+             << m_cur_time
+             << ";  dt = "   << setw(12)
+             << setprecision(6)
+             << setiosflags(ios::showpoint)
+             << setiosflags(ios::scientific)
+             << old_dt_base << ";"
+#ifdef CH_USE_TIMER
+             << "  wallclocktime = "
+             << m_timer->wc_time() - last_timestep_time
+#endif
+             << resetiosflags(ios::scientific)
+             << endl;
+      pout().flags(origFlags);
+      pout().width(origWidth);
+      pout().precision(origPrecision);
+    }
+
+    Real a_next_time = m_cur_time + old_dt_base;
+
+    if ((m_plot_clock > 0.0) || (m_checkpoint_clock > 0.0)) {
+      // Get current wall-clock time
+      #ifdef CH_MPI
+       if (prank == 0) tend = MPI_Wtime();
+       MPI_Bcast(&tend, 1, MPI_DOUBLE, 0, Chombo_MPI::comm);
+      #else
+       time(&clock_end);
+      #endif
+    }
+
+    // Plot if we've gone enough steps.
+    if ((m_plot_interval > 0) &&
+        (m_lastplot_step != m_cur_step) &&
+        (m_restart_step != m_cur_step)  &&
+        (m_cur_step % m_plot_interval == 0)) {
+      m_num_plot += 1;
+      writePlotFile();
+      m_lastplot_step = m_cur_step;
+    }
+
+    // Plot if enough time has passed.
+    if (m_plot_period > 0.0) {
+      int check_dt;
+
+      if (m_cur_step > 0) check_dt = (int) (a_next_time/m_plot_period) - (int)(m_cur_time/m_plot_period);
+      else check_dt = 1;
+
+      if ((m_lastplot_step != m_cur_step) &&
+          (m_restart_step != m_cur_step)  &&
+          (check_dt == 1)) {
+        m_num_plot += 1;
+        writePlotFile();
+        m_lastplot_step = m_cur_step;
+      }
+    }
+
+    // Plot if enough wall-clock time has passed
+    if (m_plot_clock > 0.0) {
+      int check_clock;
+      #ifdef CH_MPI
+       dclock = tend - tbeg_plt;
+      #else
+       dclock = difftime(clock_end, clock_beg_plt);
+      #endif
+      if (dclock > m_plot_clock) {
+       check_clock = 1;
+       #ifdef CH_MPI
+        tbeg_plt = tend;
+       #else
+        time(&clock_beg_plt);
+       #endif
+      } else {
+       check_clock = 0;
+      }
+
+      if ((m_lastplot_step != m_cur_step) &&
+          (m_restart_step != m_cur_step)  &&
+          (check_clock == 1)) {
+        m_num_plot += 1;
+        writePlotFile();
+        m_lastplot_step = m_cur_step;
+      }
+    }
+
+    // Drop a checkpoint file if we've gone enough steps.
+    if ((m_checkpoint_interval > 0)      &&
+        (m_lastcheck_step != m_cur_step) &&
+        (m_restart_step != m_cur_step)   &&
+        (m_cur_step % m_checkpoint_interval == 0)) {
+      m_num_check += 1;
+      writeCheckpointFile();
+      m_lastcheck_step = m_cur_step;
+    }
+
+    // Drop a checkpoint file if enough time has passed.
+    if (m_checkpoint_period > 0.0) {
+      int check_dt;
+
+      if (m_cur_step > 0) check_dt = (int) (a_next_time/m_checkpoint_period) - (int)(m_cur_time/m_checkpoint_period);
+      else check_dt = 1;
+
+      if ((m_lastcheck_step != m_cur_step) &&
+          (m_restart_step != m_cur_step)   &&
+          (check_dt == 1)) {
+        m_num_check += 1;
+        writeCheckpointFile();
+        m_lastcheck_step= m_cur_step;
+      }
+    }
+
+    // Drop a checkpoint file if enough wall-clock time has passed
+    if (m_checkpoint_clock > 0.0) {
+      int check_clock;
+      #ifdef CH_MPI
+       dclock = tend - tbeg_chk;
+      #else
+       dclock = difftime(clock_end, clock_beg_chk);
+      #endif
+      if (dclock > m_checkpoint_clock) {
+       check_clock = 1;
+       #ifdef CH_MPI
+        tbeg_chk = tend;
+       #else
+        time(&clock_beg_chk);
+       #endif
+      } else {
+       check_clock = 0;
+      }
+
+      if ((m_lastcheck_step != m_cur_step) &&
+          (m_restart_step != m_cur_step)   &&
+          (check_clock == 1)) {
+        m_num_check += 1;
+        writeCheckpointFile();
+        m_lastcheck_step= m_cur_step;
+      }
+    }
+
+    // Call any scheduled functions. This is placed here so that
+    // the plotter function can assume plot files have already been dumped.
+    if (!m_scheduler.isNull())
+      m_scheduler->execute(m_cur_step, m_cur_time);
+
+    glm_ch_max_loc = 0.0;
+
+    int level = 0;
+    int stepsLeft = 0;
+    bool timeBoundary = true;
+    (void)timeStep(level,stepsLeft,timeBoundary);
+
+    if (glm_is_defined == 1) {
+     #ifdef CH_MPI
+      int result = MPI_Allreduce(&glm_ch_max_loc, &glm_ch_max, 1, MPI_CH_REAL,
+                                 MPI_MAX, Chombo_MPI::comm);
+      if(result != MPI_SUCCESS){ //bark!!!
+        MayDay::Error("sorry, but I had a communcation error on Ch");
+      }
+     #else
+      glm_ch_max = glm_ch_max_loc;
+     #endif
+    }
+
+    if (last_timestep == 1) last_timestep = -1;
+    else{
+      if ((a_next_time + m_dt_new[0]) > a_max_time){
+        m_dt_new[0] = a_max_time - a_next_time;
+        last_timestep = 1;
+      }
+    }
+
+    assignDt();
+#ifdef CH_USE_TIMER
+    m_timer->stop();
+#endif
+
+#ifdef CH_USE_TIMER
+    last_timestep_time = m_timer->wc_time() ;
+#endif
+
+    // If we have assigned a signal handler for interrupts, check for
+    // an interrupt and call the handler.
+    if (s_interrupted)
+      break;
+    if (m_checkForSteadyState) {
+      steadyStateStop = m_amrlevels[0]->convergedToSteadyState();
+      for (int level = 1; level <= m_finest_level; ++level) {
+        steadyStateStop = ((steadyStateStop)&&(m_amrlevels[level]->convergedToSteadyState()));
+      }
+    }
+    if (steadyStateStop) {
+      pout() << "AMR: all amr levels said steady state was reached" << endl;
+      if ((m_plot_interval > 0)      &&
+          (m_lastplot_step != m_cur_step) ) {
+        m_num_plot += 1;
+        writePlotFile();
+      }
+      if ((m_checkpoint_interval > 0)      &&
+          (m_lastcheck_step != m_cur_step) ) {
+        m_num_check += 1;
+        writeCheckpointFile();
+      }
+      break;
+    }
+  }  // End main integration loop // 
 
 #ifndef CH_DISABLE_SIGNALS
   // Re-instate the old Ctrl-C handler.
@@ -1018,6 +1221,24 @@ void AMR::assignDt()
           m_amrlevels[level]->dt(m_dt_base);
         }
     }
+}
+//-----------------------------------------------------------------------
+
+//-----------------------------------------------------------------------
+// Compute minimum grid spacing over all the levels
+// (needed for GLM in curvilinear geometry).
+void AMR::computeDlMin()
+{
+
+  Real level_dl_min;
+  g_coeff_dl_min = 1.e30;
+
+  for (int level = 0; level <= m_max_level; ++level)
+  {
+    level_dl_min = m_amrlevels[level]->getDlMin();
+    g_coeff_dl_min = Min(g_coeff_dl_min, level_dl_min);
+  }
+
 }
 //-----------------------------------------------------------------------
 
@@ -1469,6 +1690,9 @@ void AMR::regrid(int a_base_level)
     {
       m_amrlevels[level]->postRegrid(a_base_level);
     }
+
+  computeDlMin();
+
 }
 //-----------------------------------------------------------------------
 
@@ -1752,23 +1976,15 @@ void AMR::writePlotFile() const
 
   CH_assert(m_isDefined);
 
-  if (m_verbosity >= 3)
-    {
-      pout() << "AMR::writePlotFile" << endl;
-    }
-
 #ifdef CH_USE_HDF5
   string iter_str = m_plotfile_prefix;
 
   char suffix[100];
-  sprintf(suffix,"%06d.%dd.hdf5",m_cur_step,SpaceDim);
+  sprintf(suffix,"%04d.hdf5",m_num_plot);
 
   iter_str += suffix;
 
-  if (m_verbosity >= 2)
-    {
-      pout() << "plot file name = " << iter_str << endl;
-    }
+  pout() << "AMR::writing " << iter_str << endl;
 
   HDF5Handle handle(iter_str.c_str(), HDF5Handle::CREATE);
 
@@ -1777,6 +1993,7 @@ void AMR::writePlotFile() const
   header.m_int ["max_level"]  = m_max_level;
   header.m_int ["num_levels"] = m_finest_level + 1;
   header.m_int ["iteration"]  = m_cur_step;
+  header.m_int ["num_pfile"]  = m_num_plot;
   header.m_real["time"]       = m_cur_time;
 
   // should steps since regrid be in the checkpoint file?
@@ -1811,23 +2028,15 @@ void AMR::writeCheckpointFile() const
 
   CH_assert(m_isDefined);
 
-  if (m_verbosity >= 3)
-    {
-      pout() << "AMR::writeCheckpointFile" << endl;
-    }
-
 #ifdef CH_USE_HDF5
   string iter_str = m_checkpointfile_prefix;
 
   char suffix[100];
-  sprintf(suffix,"%06d.%dd.hdf5",m_cur_step,SpaceDim);
+  sprintf(suffix,"%04d.hdf5",m_num_check);
 
   iter_str += suffix;
 
-  if (m_verbosity >= 2)
-    {
-      pout() << "checkpoint file name = " << iter_str << endl;
-    }
+  pout() << "AMR::writing " << iter_str << endl;
 
   HDF5Handle handle(iter_str.c_str(), HDF5Handle::CREATE);
 
@@ -1836,6 +2045,8 @@ void AMR::writeCheckpointFile() const
   header.m_int ["max_level"]  = m_max_level;
   header.m_int ["num_levels"] = m_finest_level + 1;
   header.m_int ["iteration"]  = m_cur_step;
+  header.m_int ["num_cfile"]  = m_num_check;
+  header.m_int ["num_pfile"]  = m_num_plot;
   header.m_real["time"]       = m_cur_time;
 
   for (int level = 0; level < m_regrid_intervals.size(); ++level)

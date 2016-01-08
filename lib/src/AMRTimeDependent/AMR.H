@@ -166,7 +166,7 @@ public:
      checkpoint file and tells you how many cells you updated and
      all that.
    */
-  void conclude() const;
+  void conclude();
 
   /**
      \name Parameter-setting functions
@@ -186,12 +186,14 @@ public:
   //! Tells AMR to write plot files after every \a a_plot_interval steps.
   void plotInterval(int a_plot_interval);
 
+  //! Tells AMR to write plot files after every \a a_plot_period time units.
+  void plotPeriod(Real a_plot_period);
+
+  //! Tells AMR to write plot files after every \a a_plot_clock time units.
+  void plotClock(Real a_plot_clock);
 
   //! Tells AMR to check each level for steady state and stop if we get there
   void checkForSteadyState(bool a_steadyState);
-
-  //! Tells AMR to write plot files after every \a a_plot_period time units.
-  void plotPeriod(Real a_plot_period);
 
   //! Sets up a schedule for periodically-called functions.
   void schedule(RefCountedPtr<Scheduler> a_scheduler);
@@ -202,6 +204,16 @@ public:
      time step.
   */
   void checkpointInterval(int a_checkpoint_interval);
+
+  /**
+     Sets the time interval to write checkpoint files.
+  */
+  void checkpointPeriod(Real a_checkpoint_period);
+
+  /**
+     Sets the wall-clock time interval to write checkpoint files.
+  */
+  void checkpointClock(Real a_checkpoint_clock);
 
   ///
   /**
@@ -426,6 +438,8 @@ protected:
   // step on the individual levels.
   void assignDt();
 
+  void computeDlMin();
+
   // whether regridding should be done now.
   bool needToRegrid(int a_level, int a_numStepsLeft) const;
 
@@ -439,9 +453,11 @@ protected:
   int  m_finest_level_old;
   int  m_finest_level;
   int  m_checkpoint_interval;
+  Real m_checkpoint_period;
+  Real m_checkpoint_clock;
   int  m_plot_interval;
   Real m_plot_period;
-  Real m_next_plot_time;
+  Real m_plot_clock;
   int  m_max_grid_size;
   int  m_max_base_grid_size;
   Real m_dt_tolerance_factor;
@@ -469,7 +485,12 @@ protected:
 
   int m_cur_step;
   int m_restart_step;
+
   int m_lastcheck_step;
+  int m_lastplot_step;
+
+  int m_num_check;
+  int m_num_plot;
 
   Real         m_cur_time;
   Vector<int>  m_steps_since_regrid;
